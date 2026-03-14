@@ -80,7 +80,7 @@ python -m playwright install chromium
 Scan one specific parameter on a target URL.
 
 ```bash
-python xss_slayer.py -u "https://target.com/search?q=test" -p q
+python xss_slayer.py -u "https://target.com/search?q=test" --max-pages 1
 ```
 
 ### Mode 2 — Full God Mode
