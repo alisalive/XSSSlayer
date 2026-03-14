@@ -13,13 +13,6 @@
 
 <div align="center">
 
-### 🎬 Watch XSSSlayer in Action
-
-<video src="https://github.com/alisalive/XSSSlayer/releases/download/v1.0.0/XSSSLAYERV1.0.0.mp4" width="800" controls>
-  <a href="https://github.com/alisalive/XSSSlayer/releases/download/v1.0.0/XSSSLAYERV1.0.0.mp4">▶ Watch the full demo video</a>
-</video>
-
-*Full end-to-end demonstration — from target input to confirmed XSS exploit in real time.*
 
 </div>
 
