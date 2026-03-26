@@ -69,11 +69,12 @@ done
 info "Installing Playwright system dependencies (smart resolve) ..."
 
 # Fixed packages — stable across all distros
+# Fixed packages — stable across all distros
 FIXED_PKGS=(
     libnss3
-    libatk1.0-0
-    libatk-bridge2.0-0
-    libcups2
+    libatk1.0-0t64
+    libatk-bridge2.0-0t64
+    libcups2t64
     libdrm2
     libxkbcommon0
     libxcomposite1
