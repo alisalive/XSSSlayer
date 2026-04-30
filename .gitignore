@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Playwright
+.playwright/
+
+# Scan results / output
+*.json
+*.log
+*.txt.bak
+results/
+output/
+screenshots/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / credentials
+*.key
+*.pem
+*.cert
+*.env
+.env.*
+config.local.*
