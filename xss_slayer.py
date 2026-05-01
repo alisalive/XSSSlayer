@@ -606,7 +606,7 @@ async def take_poc_screenshot(page, result: dict) -> str | None:
 async def replay_poc_visible(poc_url: str, cookies: list[dict], proxy: str | None) -> None:
     try:
         log_poc(f"[bold bright_yellow]Live PoC browser[/] → [cyan]{poc_url[:80]}[/]")
-        launch_opts = {"headless": False}
+        launch_opts = {"headless": False, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
         if proxy:
             launch_opts["proxy"] = {"server": proxy}
         async with async_playwright() as pw:
@@ -1599,7 +1599,7 @@ async def run_scan(args) -> None:
     semaphore = asyncio.Semaphore(concurrency)
     results:  list = []
 
-    launch_opts: dict = {"headless": True}
+    launch_opts: dict = {"headless": True, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
     if proxy:
         launch_opts["proxy"] = {"server": proxy}
 
