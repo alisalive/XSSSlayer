@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xssslayer"
+version = "1.0.0"
+description = "High-Performance Intelligent XSS Scanner"
+authors = [{ name = "alisalive" }]
+requires-python = ">=3.10"
+dependencies = [
+    "playwright==1.50.0",
+    "rich==13.7.1",
+    "aiohttp==3.11.11",
+    "beautifulsoup4==4.12.3",
+]
+
+[project.scripts]
+xssslayer = "xssslayer_entry:main"
+
+[tool.setuptools]
+py-modules = ["xss_slayer", "xssslayer_entry"]

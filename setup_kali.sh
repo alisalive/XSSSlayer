@@ -153,15 +153,36 @@ else
     warn "payloads.txt NOT found. Place it next to xss_slayer.py before running."
 fi
 
-# ── 7. Done ───────────────────────────────────────────────────
+# ── 7. Install Python package (editable) & register console script ──
+info "Installing xssslayer as editable package ..."
+pip install -e "$SCRIPT_DIR" -q
+success "xssslayer console script registered."
+
+# ── 8. Create global launcher at /usr/local/bin/xssslayer ────────────
+GLOBAL_BIN="/usr/local/bin/xssslayer"
+info "Creating global launcher at $GLOBAL_BIN ..."
+cat > "$GLOBAL_BIN" <<EOF
+#!/usr/bin/env bash
+# XSSSlayer global launcher
+SCRIPT_DIR="$SCRIPT_DIR"
+source "\$SCRIPT_DIR/venv/bin/activate"
+python "\$SCRIPT_DIR/xss_slayer.py" "\$@"
+EOF
+chmod +x "$GLOBAL_BIN"
+success "Global launcher created — 'xssslayer' now works from any directory."
+
+# ── 9. Done ───────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════╗${RESET}"
-echo -e "${GREEN}║  Setup complete! Run the tool with:                      ║${RESET}"
+echo -e "${GREEN}║  Setup complete! Use from any directory:                  ║${RESET}"
 echo -e "${GREEN}║                                                          ║${RESET}"
-echo -e "${GREEN}║  source venv/bin/activate                                ║${RESET}"
-echo -e "${GREEN}║  python xss_slayer.py -u \"http://TARGET/?q=x\" -p q       ║${RESET}"
+echo -e "${GREEN}║  xssslayer -u \"http://TARGET/?q=x\" -p q                  ║${RESET}"
 echo -e "${GREEN}║                                                          ║${RESET}"
 echo -e "${GREEN}║  Full god mode:                                          ║${RESET}"
-echo -e "${GREEN}║  python xss_slayer.py -u \"http://TARGET\" --show-browser  ║${RESET}"
+echo -e "${GREEN}║  xssslayer -u \"http://TARGET\" --show-browser             ║${RESET}"
+echo -e "${GREEN}║                                                          ║${RESET}"
+echo -e "${GREEN}║  Or the classic way (venv still works):                  ║${RESET}"
+echo -e "${GREEN}║  source venv/bin/activate                                ║${RESET}"
+echo -e "${GREEN}║  python xss_slayer.py -u \"http://TARGET/?q=x\" -p q       ║${RESET}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${RESET}"
 echo ""

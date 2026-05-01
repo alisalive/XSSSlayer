@@ -80,18 +80,49 @@ git clone https://github.com/alisalive/XSSSlayer.git
 cd XSSSlayer
 chmod +x setup_kali.sh
 ./setup_kali.sh
-source venv/bin/activate
 ```
 
-### Windows
+`setup_kali.sh` installs all system dependencies, creates the venv, installs Python packages, and registers `xssslayer` as a global command at `/usr/local/bin/xssslayer`.
+
+**After setup, use directly from any directory:**
+
+```bash
+xssslayer -u "https://target.com"
+xssslayer -u "https://target.com" --max-pages 60 --screenshot
+xssslayer -u "https://target.com/search?q=x" -p q --show-browser
+xssslayer --help
+```
+
+### Windows (Git Bash)
 
 ```bash
 git clone https://github.com/alisalive/XSSSlayer.git
 cd XSSSlayer
 python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-python -m playwright install chromium
+venv/Scripts/pip install -r requirements.txt
+venv/Scripts/python -m playwright install chromium
+venv/Scripts/pip install -e .
+```
+
+This registers `xssslayer` inside the venv. For system-wide access without activating the venv, add the global wrapper to your PATH:
+
+```bash
+# Run once — makes xssslayer available from any Git Bash terminal
+mkdir -p ~/bin
+cat > ~/bin/xssslayer <<'EOF'
+#!/usr/bin/env bash
+SCRIPT_DIR="/c/Users/User/XSSSlayer"
+exec "$SCRIPT_DIR/venv/Scripts/python.exe" "$SCRIPT_DIR/xss_slayer.py" "$@"
+EOF
+chmod +x ~/bin/xssslayer
+```
+
+**After setup, use directly from any directory:**
+
+```bash
+xssslayer -u "https://target.com"
+xssslayer -u "https://target.com" --max-pages 60 --screenshot
+xssslayer --help
 ```
 
 ---
@@ -103,7 +134,7 @@ python -m playwright install chromium
 Scan one specific parameter on a target URL.
 
 ```bash
-python xss_slayer.py -u "https://target.com/" --max-pages 1
+xssslayer -u "https://target.com/" --max-pages 1
 ```
 
 ### Mode 2 — Full God Mode
@@ -111,7 +142,7 @@ python xss_slayer.py -u "https://target.com/" --max-pages 1
 Maximum coverage: crawler, screenshots, Burp proxy, OOB callbacks, visible PoC browser, custom concurrency.
 
 ```bash
-python xss_slayer.py -u "https://target.com" \
+xssslayer -u "https://target.com" \
     --cookie "session=YOUR_TOKEN" \
     --xss-report YOUR_XSS_REPORT_ID \
     --show-browser --screenshot \
@@ -127,7 +158,7 @@ python xss_slayer.py -u "https://target.com" \
 Low-and-slow scan with human-like delays to evade WAFs and rate limiters.
 
 ```bash
-python xss_slayer.py -u "https://target.com" \
+xssslayer -u "https://target.com" \
     --concurrency 3 \
     --jitter 1.5 4.0 \
     --timeout 30
@@ -138,7 +169,7 @@ python xss_slayer.py -u "https://target.com" \
 Pass session cookies to scan protected pages and admin panels.
 
 ```bash
-python xss_slayer.py -u "https://target.com/admin/users?id=1" \
+xssslayer -u "https://target.com/admin/users?id=1" \
     -p id \
     --cookie "session=abc123; csrf_token=xyz" \
     --screenshot
