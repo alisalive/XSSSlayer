@@ -2030,134 +2030,142 @@ async def run_scan(args) -> None:
     if proxy:
         launch_opts["proxy"] = {"server": proxy}
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(**launch_opts)
-        ctx     = await browser.new_context(ignore_https_errors=True)
+    startup_done = False
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(**launch_opts)
+            startup_done = True
+            ctx     = await browser.new_context(ignore_https_errors=True)
 
-        try:
-            if session_cookies:
-                await ctx.add_cookies(session_cookies)
-
-            # ── Step 1: WAF Detection ──────────────────────────────
-            log_info("[bold]Step 1[/] — WAF Detection ...")
-            wp = await ctx.new_page()
-            await apply_stealth(wp)
-            await setup_page_bypass(wp, rand_ua(), rand_ip())
-            waf = await detect_waf(wp, url)
-            await wp.close()
-            if waf:
-                log_waf(f"[bold red]WAF Detected:[/] [bright_magenta]{waf}[/]")
-            else:
-                log_info("No WAF signature detected.")
-            console.print()
-
-            # ── Step 1b: Blind XSS / OOB header injection ──────────
-            if oob_context:
-                if xss_report_id:
-                    log_oob("[bold]--oob-context[/] — injecting Blind XSS/OOB into headers ...")
-                    blind_pls = build_blind_payloads(xss_report_id)
-                    await inject_oob_headers(ctx, url, blind_pls, session_cookies, proxy)
-                    console.print()
-                else:
-                    log_warn("--oob-context requires --xss-report ID — skipping header injection.")
-
-            # ── Step 2: Target Discovery ───────────────────────────
-            if auto_mode:
-                log_info("[bold]Step 2[/] — Crawl + Form Discovery + Param Mining ...")
-                targets = await auto_discover(ctx, url, max_pages, nav_timeout, mine=not no_mine)
-                if not targets:
-                    log_error("No injectable targets found. Exiting.")
-                    return
-            else:
-                targets = [ScanTarget(url=url, param=param, source_page=url)]
-                if not no_mine:
-                    log_info("[bold]Step 2[/] — Param Mining ...")
-                    mp = await ctx.new_page()
-                    try:
-                        await apply_stealth(mp)
-                        await setup_page_bypass(mp, rand_ua(), rand_ip())
-                        extra = await mine_params(mp, url, nav_timeout)
-                    except Exception:
-                        extra = []
-                    finally:
-                        await mp.close()
-                    exist = {(t.url, t.param) for t in targets}
-                    for t in extra:
-                        if (t.url, t.param) not in exist:
-                            targets.append(t); exist.add((t.url, t.param))
-                    if extra:
-                        log_mine(f"[bright_green]{len(extra)}[/] extra parameters found.")
-                    console.print()
-
-            # ── Step 3: Payload Scan ───────────────────────────────
-            step = "3" if (auto_mode or not no_mine) else "2"
-            log_info(
-                f"[bold]Step {step}[/] — God Mode Scan: "
-                f"[bright_yellow]{len(payloads)}[/] base payloads × "
-                f"[bright_green]{len(targets)}[/] target(s)"
-            )
-            console.print()
-            start = time.time()
-
-            with Progress(
-                SpinnerColumn(spinner_name="dots", style="bright_cyan"),
-                TextColumn("[bold bright_cyan]{task.description}"),
-                BarColumn(bar_width=36, style="bright_magenta", complete_style="bright_green"),
-                TaskProgressColumn(),
-                TextColumn("[dim]{task.completed}/{task.total}[/dim]"),
-                TimeElapsedColumn(),
-                console=console, transient=False,
-            ) as prog:
-                interrupted = False
-                for ti, target in enumerate(targets, 1):
-                    if is_shutdown_requested():
-                        interrupted = True
-                        break
-                    short = target.source_page.split("?")[0][-28:]
-                    tid   = prog.add_task(f"[{ti}/{len(targets)}] {short} → {target.param}",
-                                          total=len(payloads))
-                    interrupted = await scan_one_target(
-                        ctx, target, payloads, semaphore, results, prog, tid,
-                        nav_timeout=nav_timeout, jitter_min=jitter_min, jitter_max=jitter_max,
-                        show_browser=show_browser, take_screenshot=take_screenshot,
-                        cookies=session_cookies, proxy=proxy, xss_report_id=xss_report_id,
-                        dialog_timeout=dialog_timeout, background_tasks=background_tasks,
-                        waf=waf, retry_delay=retry_delay,
-                    )
-                    if interrupted:
-                        break
-
-                # ── Step 4: DOM XSS (URL fragment scan) ───────────
-                if not interrupted:
-                    console.print()
-                    log_info(f"[bold]Step {int(step)+1}[/] — DOM / SPA XSS (URL fragment scan) ...")
-                    dom_page = await ctx.new_page()
-                    try:
-                        await apply_stealth(dom_page)
-                        await setup_page_bypass(dom_page, rand_ua(), rand_ip())
-                        dom_findings = await check_dom_xss(
-                            dom_page, url, payloads, nav_timeout, jitter_min, jitter_max,
-                            dialog_timeout=dialog_timeout,
-                        )
-                        for df in dom_findings:
-                            if take_screenshot:
-                                df["screenshot"] = await take_poc_screenshot(dom_page, df)
-                            results.append(df)
-                    except Exception as e:
-                        log_warn(f"DOM XSS scan error: {e}")
-                    finally:
-                        await dom_page.close()
-
-        finally:
-            if background_tasks:
-                for t in background_tasks:
-                    if not t.done():
-                        t.cancel()
-                await asyncio.gather(*background_tasks, return_exceptions=True)
             try:
-                await asyncio.wait_for(browser.close(), timeout=5)
-            except Exception:
-                pass
+                if session_cookies:
+                    await ctx.add_cookies(session_cookies)
+
+                # ── Step 1: WAF Detection ──────────────────────────────
+                log_info("[bold]Step 1[/] — WAF Detection ...")
+                wp = await ctx.new_page()
+                await apply_stealth(wp)
+                await setup_page_bypass(wp, rand_ua(), rand_ip())
+                waf = await detect_waf(wp, url)
+                await wp.close()
+                if waf:
+                    log_waf(f"[bold red]WAF Detected:[/] [bright_magenta]{waf}[/]")
+                else:
+                    log_info("No WAF signature detected.")
+                console.print()
+
+                # ── Step 1b: Blind XSS / OOB header injection ──────────
+                if oob_context:
+                    if xss_report_id:
+                        log_oob("[bold]--oob-context[/] — injecting Blind XSS/OOB into headers ...")
+                        blind_pls = build_blind_payloads(xss_report_id)
+                        await inject_oob_headers(ctx, url, blind_pls, session_cookies, proxy)
+                        console.print()
+                    else:
+                        log_warn("--oob-context requires --xss-report ID — skipping header injection.")
+
+                # ── Step 2: Target Discovery ───────────────────────────
+                if auto_mode:
+                    log_info("[bold]Step 2[/] — Crawl + Form Discovery + Param Mining ...")
+                    targets = await auto_discover(ctx, url, max_pages, nav_timeout, mine=not no_mine)
+                    if not targets:
+                        log_error("No injectable targets found. Exiting.")
+                        return
+                else:
+                    targets = [ScanTarget(url=url, param=param, source_page=url)]
+                    if not no_mine:
+                        log_info("[bold]Step 2[/] — Param Mining ...")
+                        mp = await ctx.new_page()
+                        try:
+                            await apply_stealth(mp)
+                            await setup_page_bypass(mp, rand_ua(), rand_ip())
+                            extra = await mine_params(mp, url, nav_timeout)
+                        except Exception:
+                            extra = []
+                        finally:
+                            await mp.close()
+                        exist = {(t.url, t.param) for t in targets}
+                        for t in extra:
+                            if (t.url, t.param) not in exist:
+                                targets.append(t); exist.add((t.url, t.param))
+                        if extra:
+                            log_mine(f"[bright_green]{len(extra)}[/] extra parameters found.")
+                        console.print()
+
+                # ── Step 3: Payload Scan ───────────────────────────────
+                step = "3" if (auto_mode or not no_mine) else "2"
+                log_info(
+                    f"[bold]Step {step}[/] — God Mode Scan: "
+                    f"[bright_yellow]{len(payloads)}[/] base payloads × "
+                    f"[bright_green]{len(targets)}[/] target(s)"
+                )
+                console.print()
+                start = time.time()
+
+                with Progress(
+                    SpinnerColumn(spinner_name="dots", style="bright_cyan"),
+                    TextColumn("[bold bright_cyan]{task.description}"),
+                    BarColumn(bar_width=36, style="bright_magenta", complete_style="bright_green"),
+                    TaskProgressColumn(),
+                    TextColumn("[dim]{task.completed}/{task.total}[/dim]"),
+                    TimeElapsedColumn(),
+                    console=console, transient=False,
+                ) as prog:
+                    interrupted = False
+                    for ti, target in enumerate(targets, 1):
+                        if is_shutdown_requested():
+                            interrupted = True
+                            break
+                        short = target.source_page.split("?")[0][-28:]
+                        tid   = prog.add_task(f"[{ti}/{len(targets)}] {short} → {target.param}",
+                                              total=len(payloads))
+                        interrupted = await scan_one_target(
+                            ctx, target, payloads, semaphore, results, prog, tid,
+                            nav_timeout=nav_timeout, jitter_min=jitter_min, jitter_max=jitter_max,
+                            show_browser=show_browser, take_screenshot=take_screenshot,
+                            cookies=session_cookies, proxy=proxy, xss_report_id=xss_report_id,
+                            dialog_timeout=dialog_timeout, background_tasks=background_tasks,
+                            waf=waf, retry_delay=retry_delay,
+                        )
+                        if interrupted:
+                            break
+
+                    # ── Step 4: DOM XSS (URL fragment scan) ───────────
+                    if not interrupted:
+                        console.print()
+                        log_info(f"[bold]Step {int(step)+1}[/] — DOM / SPA XSS (URL fragment scan) ...")
+                        dom_page = await ctx.new_page()
+                        try:
+                            await apply_stealth(dom_page)
+                            await setup_page_bypass(dom_page, rand_ua(), rand_ip())
+                            dom_findings = await check_dom_xss(
+                                dom_page, url, payloads, nav_timeout, jitter_min, jitter_max,
+                                dialog_timeout=dialog_timeout,
+                            )
+                            for df in dom_findings:
+                                if take_screenshot:
+                                    df["screenshot"] = await take_poc_screenshot(dom_page, df)
+                                results.append(df)
+                        except Exception as e:
+                            log_warn(f"DOM XSS scan error: {e}")
+                        finally:
+                            await dom_page.close()
+
+            finally:
+                if background_tasks:
+                    for t in background_tasks:
+                        if not t.done():
+                            t.cancel()
+                    await asyncio.gather(*background_tasks, return_exceptions=True)
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=5)
+                except Exception:
+                    pass
+    except Exception as e:
+        if not startup_done and (is_shutdown_requested() or "closed while reading from the driver" in str(e)):
+            log_warn("Scan interrupted during startup — exiting cleanly.")
+            return
+        raise
 
     elapsed = time.time() - start
     console.print()
