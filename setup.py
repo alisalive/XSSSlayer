@@ -8,7 +8,7 @@ setup(
     python_requires=">=3.10",
     py_modules=["xss_slayer", "xssslayer_entry"],
     install_requires=[
-        "playwright==1.50.0",
+        "playwright>=1.51.0",
         "rich==13.7.1",
         "aiohttp==3.11.11",
         "beautifulsoup4==4.12.3",
