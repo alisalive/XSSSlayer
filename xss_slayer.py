@@ -65,6 +65,7 @@ JITTER_MAX       = 1.5     # s  — default maximum jitter
 MAX_CRAWL_PAGES  = 30
 MAX_RANKED_PL    = 800
 MAX_BTN_CLICKS   = 6
+WATCHDOG_STALL_S = 20.0    # s — no task completions in this window ⇒ assume dead browser connection
 
 PROBE_CHARS = list('<>"\'(){}[];/\\=:#&`|~^')
 
@@ -1141,7 +1142,7 @@ def _build_waf_profiles() -> dict[str, dict]:
         cf_payloads.append(inject_comment_junk(p))
     cf_payloads += [
         "<svg%00/onload=alert(1)>",
-        "<img src=x\x00 onerror=alert(1)>",
+        "<img src=x\\x00 onerror=alert(1)>",
         "<sVg\t/onload=alert(1)>",
         "<svg onload=\\u0061lert(1)>",
     ]
@@ -1801,13 +1802,26 @@ async def scan_one_target(
         for pl in smart
     ]
     pending_tasks = set(task_objs)
+    last_progress = time.time()
     while pending_tasks:
-        _done, pending_tasks = await asyncio.wait(pending_tasks, timeout=0.25)
+        done, pending_tasks = await asyncio.wait(pending_tasks, timeout=0.25)
+        if done:
+            last_progress = time.time()
         if pending_tasks and is_shutdown_requested():
             for t in pending_tasks:
                 t.cancel()
             await asyncio.gather(*pending_tasks, return_exceptions=True)
             log_warn(f"Cancelled [bold yellow]{len(pending_tasks)}[/] in-flight requests.")
+            return True
+        if pending_tasks and (time.time() - last_progress) > WATCHDOG_STALL_S:
+            log_error(
+                "Browser connection lost — this usually means a payload contained "
+                "an invalid control character. Stopping scan safely."
+            )
+            for t in pending_tasks:
+                t.cancel()
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+            request_shutdown()
             return True
     return False
 
