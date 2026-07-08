@@ -43,12 +43,12 @@ Every finding is confirmed by a real `alert()` / `confirm()` / `prompt()` dialog
 |---|---|
 | **Detection Engine** | Dialog-only XSS confirmation (0 false positives), DOM XSS via MutationObserver, URL fragment (`#`) SPA testing |
 | **Context Analysis** | 12 injection contexts: `HTML_BODY`, `ATTR_DQ/SQ/BARE`, `SCRIPT_STRING`, `COMMENT`, `STYLE`, and more |
-| **Fuzzing Engine** | 22-char batch probe, allowed/blocked char analysis, context-escape prefix generation |
+| **Fuzzing Engine** | 22-char batch probe, allowed/blocked char analysis (raw HTTP response + DOM cross-check), context-escape prefix generation |
 | **AI Heuristic** | Generates novel payloads on-the-fly based on char allowlist from fuzz results |
-| **WAF Bypass** | UA rotation, X-Forwarded-For spoofing, 403/429 backoff, double URL encode, base64 `eval(atob())`, hex `\xNN`, unicode `\uNNNN`, comment junk (`scr/**/ipt`), case randomizer (`OnErRoR`) |
+| **WAF Bypass** | WAF fingerprinting + tailored bypass profiles (Cloudflare/F5/Akamai/Imperva), UA rotation, X-Forwarded-For spoofing, adaptive 403/429 backoff, double URL encode, base64 `eval(atob())`, hex `\xNN`, unicode `\uNNNN`, comment junk (`scr/**/ipt`), case randomizer (`OnErRoR`) |
 | **Stealth** | Playwright fingerprint masking: `navigator.webdriver`, `hardwareConcurrency`, WebGL, plugins, chrome object, screen dimensions |
 | **Auto-Discovery** | Form/input discovery, parameter mining (hidden inputs, JS hints, JSON body), BFS same-origin crawler |
-| **Blind / OOB XSS** | `--xss-report` injects callback URLs for out-of-band detection |
+| **Blind / OOB XSS** | `--xss-report` injects callback payloads (cookie/localStorage/URL exfil) into params and, optionally, headers |
 | **Output** | Dark-theme HTML report with risk levels, screenshots, elapsed time, payload detail |
 | **Session Support** | `--cookie` for authenticated panel testing |
 | **Proxy Support** | `--proxy` for Burp Suite integration |
@@ -57,12 +57,23 @@ Every finding is confirmed by a real `alert()` / `confirm()` / `prompt()` dialog
 
 ## What's new in v2.0
 
-- **Fixed false "BLOCKED" detection** — the fuzzer used to check the DOM-serialized page content, which always HTML-encodes `<` and `>` even when the target doesn't actually block them. It now reads the raw HTTP response body first (falling back to DOM text for SPAs), so allowed characters are reported accurately.
-- **Faster dialog detection** — instead of always waiting out a fixed timeout for every payload, XSSSlayer now polls and exits the instant a dialog fires. Add `--fast` for near-zero jitter, a shorter dialog timeout, and higher default concurrency when you need raw speed over maximum thoroughness.
-- **Clean Ctrl+C shutdown** — interrupting a scan now cancels all in-flight requests and closes the browser gracefully, printing a single "Cancelled N in-flight requests." summary instead of a wall of `TargetClosedError` spam.
-- **WAF-specific bypass profiles** — once a WAF is fingerprinted (Cloudflare, F5, Akamai, Imperva, or generic), XSSSlayer now prioritizes payloads and evasion techniques tailored to that specific WAF instead of a one-size-fits-all payload list.
+**Correctness**
+- **Fixed false "BLOCKED" detection** — the fuzzer used to check DOM-serialized page content, which always HTML-encodes `<` and `>` even when the target doesn't actually block them. It now reads the raw HTTP response body first (falling back to DOM text for SPAs), so allowed characters are reported accurately.
+
+**Speed**
+- **Faster payload scanning** — replaced fixed dialog-wait timeouts with early-exit polling, so the scanner moves on the instant a dialog fires instead of always waiting out the full timeout. Applies to both the main payload scanner and the DOM/SPA fragment scanner (Step 4).
+- **`--fast` mode** — near-zero jitter, shorter dialog timeout, and higher default concurrency for when you need raw speed over maximum thoroughness.
+
+**Stability**
+- **Clean Ctrl+C shutdown** — interrupting a scan, at any stage (including mid-startup), now exits gracefully with a clean summary instead of a wall of tracebacks.
+- **Connection-stall watchdog** — if the browser connection stalls or dies mid-scan, XSSSlayer now detects it after 20 seconds, stops safely, and saves whatever results were already found — instead of hanging indefinitely.
+- **Fixed a payload-transport crash** — a raw NUL/control byte in one of the built-in payloads could corrupt Playwright's internal browser connection under high concurrency. All payloads are now transport-safe.
+- **Fixed a Playwright version mismatch** — `setup.py`/`pyproject.toml` no longer silently downgrade an already-installed newer Playwright, which used to break the cached Chromium binary.
+
+**New capabilities**
+- **WAF-specific bypass profiles** — once a WAF is fingerprinted (Cloudflare, F5, Akamai, Imperva, or generic), XSSSlayer prioritizes payloads and evasion techniques tailored to that specific WAF instead of a one-size-fits-all list.
 - **Expanded Blind XSS / OOB coverage** — new payload variants exfiltrate cookies, localStorage, and the current URL to your callback. Add `--oob-context` to also plant blind payloads in the Referer, User-Agent, and X-Forwarded-For headers, not just form/URL parameters.
-- **Adaptive concurrency** — when the target starts throwing repeated 403/429 responses, XSSSlayer automatically throttles down the number of concurrent tabs, then restores full concurrency once the target settles down. Tune the backoff wait with the new `--retry-delay` flag.
+- **Adaptive concurrency** — when the target starts throwing repeated 403/429 responses, XSSSlayer automatically throttles down the number of concurrent tabs, then restores full concurrency once the target settles down. Tune the backoff wait with `--retry-delay`.
 
 ---
 
@@ -187,6 +198,14 @@ xssslayer -u "https://target.com/admin/users?id=1" \
     --screenshot
 ```
 
+### Mode 6 — Speed Run
+
+Trade a little thoroughness for a lot of speed.
+
+```bash
+xssslayer -u "https://target.com" --fast
+```
+
 ---
 
 ## Flag Reference
@@ -224,18 +243,23 @@ Target URL
     │       └─► Form / Input Discovery
     │               └─► Parameter Mining (hidden fields, JS hints, JSON body)
     │
-    └─► Step 3: God Mode Scan
-            ├─► Context Analysis (Batch Fuzz → 12 context types)
-            │       └─► Allowed/Blocked char detection
-            ├─► Payload Selection
-            │       ├─► 15 Universal Polyglots
-            │       ├─► Context-Specific Escapes
-            │       ├─► AI Heuristic (on-the-fly from fuzz results)
-            │       └─► 2769 payloads from file + WAF Bypass Encodings
-            └─► Real Browser Execution (Playwright Chromium)
-                    ├─► page.on("dialog") → XSS Confirmed ✓
-                    ├─► MutationObserver  → DOM XSS Confirmed ✓
-                    └─► HTML Report + Screenshot (optional)
+    ├─► Step 3: God Mode Scan
+    │       ├─► Context Analysis (Batch Fuzz → 12 context types)
+    │       │       └─► Allowed/Blocked char detection (raw response + DOM cross-check)
+    │       ├─► Payload Selection
+    │       │       ├─► 15 Universal Polyglots
+    │       │       ├─► Context-Specific Escapes
+    │       │       ├─► AI Heuristic (on-the-fly from fuzz results)
+    │       │       ├─► WAF-Specific Bypass Profile (if fingerprinted)
+    │       │       └─► 2769 payloads from file + Encoding Variants
+    │       └─► Real Browser Execution (Playwright Chromium)
+    │               ├─► page.on("dialog") → XSS Confirmed ✓
+    │               └─► Early-exit polling (no fixed waits)
+    │
+    └─► Step 4: DOM / SPA XSS (URL fragment scan)
+            └─► MutationObserver → DOM XSS Confirmed ✓
+
+              → HTML Report + Screenshot (optional)
 ```
 
 ---
@@ -357,9 +381,24 @@ Lines like `N: Skipping acquire of configured file ... brave-browser` are **harm
 
 ---
 
-### `TargetClosedError` spam after pressing Ctrl+C
+### Playwright silently downgraded / Chromium executable not found after `pip install -e .`
 
-**Fixed in v2.0.** Interrupting a scan now cancels in-flight requests and closes the browser gracefully, printing one clean summary line instead of a `TargetClosedError` per tab.
+**Fixed in v2.0.** `setup.py`/`pyproject.toml` used to pin an older Playwright version, which could silently downgrade an already-installed newer one and break the cached Chromium binary. Both files now match `requirements.txt`. If you still hit `BrowserType.launch: Executable doesn't exist`, just re-run:
+```bash
+python -m playwright install chromium
+```
+
+---
+
+### Scan hangs indefinitely with no progress
+
+**Fixed in v2.0.** A connection-stall watchdog now detects a dead/frozen browser connection after 20 seconds of no progress, logs a warning, and stops the scan safely with whatever results were already found — instead of hanging forever.
+
+---
+
+### Traceback / crash after pressing Ctrl+C
+
+**Fixed in v2.0.** Interrupting a scan — at any point, including during startup — now exits gracefully with a clean summary line instead of a `TargetClosedError`/traceback spam.
 
 ---
 
@@ -384,10 +423,5 @@ If XSSSlayer helped you find a bug bounty or level up your security research:
 <p align="center">
   Developed by <strong>alisalive.exe</strong> &nbsp;|&nbsp; GitHub: <a href="https://github.com/alisalive">alisalive</a>
   <br><br>
-<<<<<<< HEAD
-  <strong>XSSSlayer v1.0.0 — The Ultimate XSS Hunter</strong>
-</p>
-=======
   <strong>XSSSlayer v2.0.0 — The Ultimate XSS Hunter</strong>
 </p>
->>>>>>> 29fb405 (v2.0.0: fix false <> block detection, speed up scans, clean Ctrl+C shutdown, WAF-specific bypass profiles, expanded blind XSS/OOB, adaptive concurrency)
