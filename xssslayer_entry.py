@@ -2,9 +2,11 @@
 """Entry point wrapper for the xssslayer CLI command."""
 
 import asyncio
+import os
+import signal
 import sys
 
-from xss_slayer import parse_args, run_scan, console, is_target_closed_error
+from xss_slayer import parse_args, run_scan, console, is_target_closed_error, request_shutdown
 
 
 def _quiet_exception_handler(loop, context):
@@ -19,6 +21,33 @@ def _quiet_exception_handler(loop, context):
     loop.default_exception_handler(context)
 
 
+def _install_sigint_handler():
+    """
+    Replace the default SIGINT handler so Ctrl+C never raises
+    KeyboardInterrupt into arbitrary running code (e.g. mid-write inside
+    Playwright's own cleanup, which used to produce a second traceback).
+
+    First Ctrl+C: sets a cooperative flag that run_scan() polls between
+    batches, then returns normally — no exception is ever raised.
+    Second Ctrl+C: the user is impatient / something is stuck, so force-exit
+    immediately with no further cleanup.
+    """
+    pressed = False
+
+    def handler(signum, frame):
+        nonlocal pressed
+        if pressed:
+            os._exit(1)
+        pressed = True
+        console.print(
+            "\n[bold red]Scan interrupted by user.[/] "
+            "[dim]Finishing current batch and closing browser gracefully...[/]"
+        )
+        request_shutdown()
+
+    signal.signal(signal.SIGINT, handler)
+
+
 def main():
     args = parse_args()
 
@@ -29,26 +58,10 @@ def main():
     asyncio.set_event_loop(loop)
     loop.set_exception_handler(_quiet_exception_handler)
 
+    _install_sigint_handler()
+
     try:
         loop.run_until_complete(run_scan(args))
-    except KeyboardInterrupt:
-        console.print(
-            "\n[bold red]Scan interrupted by user.[/] "
-            "[dim]Closing browser gracefully...[/]"
-        )
-        pending = asyncio.all_tasks(loop)
-        for t in pending:
-            t.cancel()
-        if pending:
-            try:
-                loop.run_until_complete(
-                    asyncio.wait_for(
-                        asyncio.gather(*pending, return_exceptions=True),
-                        timeout=10,
-                    )
-                )
-            except Exception:
-                pass
     finally:
         try:
             loop.run_until_complete(loop.shutdown_asyncgens())

@@ -10,6 +10,8 @@
 """
 
 import asyncio
+import os
+import signal
 import sys
 import time
 import random
@@ -604,6 +606,20 @@ def is_target_closed_error(e: BaseException) -> bool:
     error module, so this stays stable across Playwright versions.
     """
     return type(e).__name__ == "TargetClosedError"
+
+# ── Cooperative shutdown flag ────────────────────────────────────
+# Set by the SIGINT handler in xssslayer_entry.py on the first Ctrl+C.
+# Never raised as an exception — run_scan()/scan_one_target() poll this
+# flag at safe points and cancel their own tasks, so no code path (not
+# even Playwright's internal socket writes) is interrupted mid-operation.
+_shutdown_requested = False
+
+def request_shutdown() -> None:
+    global _shutdown_requested
+    _shutdown_requested = True
+
+def is_shutdown_requested() -> bool:
+    return _shutdown_requested
 
 def same_origin(a: str, b: str) -> bool:
     pa, pb = urllib.parse.urlparse(a), urllib.parse.urlparse(b)
@@ -1716,7 +1732,8 @@ async def scan_one_target(
     retry_delay:     int   = RATE_LIMIT_DELAY,
     background_tasks: list = None,
     waf:             str   = None,
-) -> None:
+) -> bool:
+    """Returns True if the scan was cut short by a cooperative shutdown request."""
     console.print()
     console.print(Rule(f"[bold bright_cyan] {target.label} [/]", style="bright_cyan"))
 
@@ -1761,16 +1778,16 @@ async def scan_one_target(
         )
         for pl in smart
     ]
-    try:
-        await asyncio.gather(*task_objs, return_exceptions=True)
-    except asyncio.CancelledError:
-        pending = [t for t in task_objs if not t.done()]
-        for t in pending:
-            t.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        log_warn(f"Cancelled [bold yellow]{len(pending)}[/] in-flight requests.")
-        raise
+    pending_tasks = set(task_objs)
+    while pending_tasks:
+        _done, pending_tasks = await asyncio.wait(pending_tasks, timeout=0.25)
+        if pending_tasks and is_shutdown_requested():
+            for t in pending_tasks:
+                t.cancel()
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+            log_warn(f"Cancelled [bold yellow]{len(pending_tasks)}[/] in-flight requests.")
+            return True
+    return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2055,11 +2072,15 @@ async def run_scan(args) -> None:
                 TimeElapsedColumn(),
                 console=console, transient=False,
             ) as prog:
+                interrupted = False
                 for ti, target in enumerate(targets, 1):
+                    if is_shutdown_requested():
+                        interrupted = True
+                        break
                     short = target.source_page.split("?")[0][-28:]
                     tid   = prog.add_task(f"[{ti}/{len(targets)}] {short} → {target.param}",
                                           total=len(payloads))
-                    await scan_one_target(
+                    interrupted = await scan_one_target(
                         ctx, target, payloads, semaphore, results, prog, tid,
                         nav_timeout=nav_timeout, jitter_min=jitter_min, jitter_max=jitter_max,
                         show_browser=show_browser, take_screenshot=take_screenshot,
@@ -2067,32 +2088,29 @@ async def run_scan(args) -> None:
                         dialog_timeout=dialog_timeout, background_tasks=background_tasks,
                         waf=waf, retry_delay=retry_delay,
                     )
+                    if interrupted:
+                        break
 
                 # ── Step 4: DOM XSS (URL fragment scan) ───────────
-                console.print()
-                log_info(f"[bold]Step {int(step)+1}[/] — DOM / SPA XSS (URL fragment scan) ...")
-                dom_page = await ctx.new_page()
-                try:
-                    await apply_stealth(dom_page)
-                    await setup_page_bypass(dom_page, rand_ua(), rand_ip())
-                    dom_findings = await check_dom_xss(
-                        dom_page, url, payloads, nav_timeout, jitter_min, jitter_max
-                    )
-                    for df in dom_findings:
-                        if take_screenshot:
-                            df["screenshot"] = await take_poc_screenshot(dom_page, df)
-                        results.append(df)
-                except Exception as e:
-                    log_warn(f"DOM XSS scan error: {e}")
-                finally:
-                    await dom_page.close()
+                if not interrupted:
+                    console.print()
+                    log_info(f"[bold]Step {int(step)+1}[/] — DOM / SPA XSS (URL fragment scan) ...")
+                    dom_page = await ctx.new_page()
+                    try:
+                        await apply_stealth(dom_page)
+                        await setup_page_bypass(dom_page, rand_ua(), rand_ip())
+                        dom_findings = await check_dom_xss(
+                            dom_page, url, payloads, nav_timeout, jitter_min, jitter_max
+                        )
+                        for df in dom_findings:
+                            if take_screenshot:
+                                df["screenshot"] = await take_poc_screenshot(dom_page, df)
+                            results.append(df)
+                    except Exception as e:
+                        log_warn(f"DOM XSS scan error: {e}")
+                    finally:
+                        await dom_page.close()
 
-        except asyncio.CancelledError:
-            log_warn(
-                "[bold yellow]Scan interrupted[/] — cancelling in-flight requests "
-                "and closing browser gracefully ..."
-            )
-            raise
         finally:
             if background_tasks:
                 for t in background_tasks:
@@ -2273,6 +2291,29 @@ Examples:
     return p.parse_args()
 
 
+def _install_sigint_handler():
+    """
+    Replace the default SIGINT handler so Ctrl+C never raises
+    KeyboardInterrupt into arbitrary running code. First press sets the
+    cooperative shutdown flag; a second, impatient press force-exits.
+    See xssslayer_entry.py for the full rationale.
+    """
+    pressed = False
+
+    def handler(signum, frame):
+        nonlocal pressed
+        if pressed:
+            os._exit(1)
+        pressed = True
+        console.print(
+            "\n[bold red]Scan interrupted by user.[/] "
+            "[dim]Finishing current batch and closing browser gracefully...[/]"
+        )
+        request_shutdown()
+
+    signal.signal(signal.SIGINT, handler)
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -2280,8 +2321,6 @@ if __name__ == "__main__":
     if args.jitter[0] > args.jitter[1]:
         args.jitter = [args.jitter[1], args.jitter[0]]
 
-    try:
-        asyncio.run(run_scan(args))
-    except KeyboardInterrupt:
-        console.print("\n[bold red]Scan interrupted by user.[/]")
-        sys.exit(0)
+    _install_sigint_handler()
+    asyncio.run(run_scan(args))
+    sys.exit(0)
