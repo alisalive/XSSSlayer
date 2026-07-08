@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-red?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/version-2.0.0-red?style=for-the-badge" />
   <img src="https://img.shields.io/badge/python-3.10+-blue?style=for-the-badge&logo=python" />
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey?style=for-the-badge" />
   <img src="https://img.shields.io/badge/engine-Playwright%20Chromium-green?style=for-the-badge" />
@@ -52,6 +52,17 @@ Every finding is confirmed by a real `alert()` / `confirm()` / `prompt()` dialog
 | **Output** | Dark-theme HTML report with risk levels, screenshots, elapsed time, payload detail |
 | **Session Support** | `--cookie` for authenticated panel testing |
 | **Proxy Support** | `--proxy` for Burp Suite integration |
+
+---
+
+## What's new in v2.0
+
+- **Fixed false "BLOCKED" detection** — the fuzzer used to check the DOM-serialized page content, which always HTML-encodes `<` and `>` even when the target doesn't actually block them. It now reads the raw HTTP response body first (falling back to DOM text for SPAs), so allowed characters are reported accurately.
+- **Faster dialog detection** — instead of always waiting out a fixed timeout for every payload, XSSSlayer now polls and exits the instant a dialog fires. Add `--fast` for near-zero jitter, a shorter dialog timeout, and higher default concurrency when you need raw speed over maximum thoroughness.
+- **Clean Ctrl+C shutdown** — interrupting a scan now cancels all in-flight requests and closes the browser gracefully, printing a single "Cancelled N in-flight requests." summary instead of a wall of `TargetClosedError` spam.
+- **WAF-specific bypass profiles** — once a WAF is fingerprinted (Cloudflare, F5, Akamai, Imperva, or generic), XSSSlayer now prioritizes payloads and evasion techniques tailored to that specific WAF instead of a one-size-fits-all payload list.
+- **Expanded Blind XSS / OOB coverage** — new payload variants exfiltrate cookies, localStorage, and the current URL to your callback. Add `--oob-context` to also plant blind payloads in the Referer, User-Agent, and X-Forwarded-For headers, not just form/URL parameters.
+- **Adaptive concurrency** — when the target starts throwing repeated 403/429 responses, XSSSlayer automatically throttles down the number of concurrent tabs, then restores full concurrency once the target settles down. Tune the backoff wait with the new `--retry-delay` flag.
 
 ---
 
@@ -188,9 +199,12 @@ xssslayer -u "https://target.com/admin/users?id=1" \
 | `--timeout` | `15` | Navigation timeout in seconds |
 | `--jitter MIN MAX` | `0.3 1.5` | Random delay range between requests (seconds) |
 | `--max-pages` | `30` | Max pages to crawl in auto-discovery mode |
+| `--fast` | Off | Speed mode: near-zero jitter, faster dialog timeout, higher concurrency |
 | `--proxy` | None | HTTP proxy (e.g. `http://127.0.0.1:8080`) |
 | `--cookie` | None | Session cookies (`"name=value; name2=value2"`) |
+| `--retry-delay` | `10` | Backoff delay in seconds on 403/429 responses |
 | `--xss-report` | None | Blind/OOB XSS callback ID |
+| `--oob-context` | Off | Also inject Blind XSS/OOB payloads into Referer, User-Agent, X-Forwarded-For headers |
 | `--screenshot` | Off | Save PNG screenshots of confirmed XSS |
 | `--show-browser` | Off | Open visible Chromium window on XSS confirmation |
 | `--no-mine` | Off | Disable parameter mining |
@@ -345,7 +359,7 @@ Lines like `N: Skipping acquire of configured file ... brave-browser` are **harm
 
 ### `TargetClosedError` spam after pressing Ctrl+C
 
-**Normal behavior.** When you interrupt a scan with Ctrl+C, all concurrent browser tabs close simultaneously and each logs a `TargetClosedError`. The scan stopped cleanly — this is not a bug.
+**Fixed in v2.0.** Interrupting a scan now cancels in-flight requests and closes the browser gracefully, printing one clean summary line instead of a `TargetClosedError` per tab.
 
 ---
 
@@ -370,5 +384,10 @@ If XSSSlayer helped you find a bug bounty or level up your security research:
 <p align="center">
   Developed by <strong>alisalive.exe</strong> &nbsp;|&nbsp; GitHub: <a href="https://github.com/alisalive">alisalive</a>
   <br><br>
+<<<<<<< HEAD
   <strong>XSSSlayer v1.0.0 — The Ultimate XSS Hunter</strong>
 </p>
+=======
+  <strong>XSSSlayer v2.0.0 — The Ultimate XSS Hunter</strong>
+</p>
+>>>>>>> 29fb405 (v2.0.0: fix false <> block detection, speed up scans, clean Ctrl+C shutdown, WAF-specific bypass profiles, expanded blind XSS/OOB, adaptive concurrency)

