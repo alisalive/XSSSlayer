@@ -510,7 +510,8 @@ class AdaptiveConcurrency:
     the original limit after a cooldown period.
     """
     def __init__(self, limit: int, window_s: float = 20.0, threshold: int = 5,
-                 shrink_to: int | None = None, cooldown_s: float = 30.0):
+                 shrink_to: int | None = None, cooldown_s: float = 30.0,
+                 background_tasks: list = None):
         self.limit      = limit
         self.semaphore  = asyncio.Semaphore(limit)
         self.window_s   = window_s
@@ -521,6 +522,7 @@ class AdaptiveConcurrency:
         self._throttled  = False
         self._held       = 0
         self._lock       = asyncio.Lock()
+        self._background_tasks = background_tasks
 
     async def __aenter__(self):
         await self.semaphore.acquire()
@@ -547,7 +549,9 @@ class AdaptiveConcurrency:
             f"{self.window_s:.0f}s → reducing concurrency "
             f"[bright_yellow]{self.limit}→{self.shrink_to}[/] for {self.cooldown_s:.0f}s"
         )
-        asyncio.ensure_future(self._restore())
+        restore_task = asyncio.ensure_future(self._restore())
+        if self._background_tasks is not None:
+            self._background_tasks.append(restore_task)
 
     async def _restore(self) -> None:
         await asyncio.sleep(self.cooldown_s)
@@ -1262,7 +1266,8 @@ def select_smart_payloads(
 #  DOM XSS & SPA SUPPORT
 # ══════════════════════════════════════════════════════════════
 async def check_dom_xss(page, base_url: str, payloads: list[str],
-                        nav_timeout: int, jitter_min: float, jitter_max: float) -> list[dict]:
+                        nav_timeout: int, jitter_min: float, jitter_max: float,
+                        dialog_timeout: int = DIALOG_TIMEOUT) -> list[dict]:
     """
     Test URL fragments (#payload) for DOM-based / SPA XSS.
     Also injects a MutationObserver to catch dynamically inserted scripts.
@@ -1274,6 +1279,8 @@ async def check_dom_xss(page, base_url: str, payloads: list[str],
     log_dom(f"Testing [bright_yellow]{min(len(payloads), 60)}[/] payloads via URL fragments ...")
 
     for payload in payloads[:60]:   # test top 60 on fragments
+        if is_shutdown_requested():
+            break
         try:
             dialog_triggered = False
             dialog_message   = ""
@@ -1299,14 +1306,29 @@ async def check_dom_xss(page, base_url: str, payloads: list[str],
                 continue
 
             await human_interact(page)
-            await asyncio.sleep(1.2)
 
-            # Check both native dialog and our overridden window.alert hook
+            # Poll in small increments instead of a flat sleep, exiting the
+            # moment a dialog fires or the DOM-hook flag flips true. Also
+            # checks both flags every iteration so --fast's shorter
+            # dialog_timeout is actually respected here too.
             dom_triggered = False
             dom_msg       = ""
+            elapsed_ms = 0
+            poll_interval_ms = 100
+            while elapsed_ms < dialog_timeout:
+                if dialog_triggered:
+                    break
+                try:
+                    dom_triggered = await page.evaluate("window.__xss_dom_triggered || false")
+                except Exception:
+                    pass
+                if dom_triggered:
+                    break
+                await asyncio.sleep(poll_interval_ms / 1000)
+                elapsed_ms += poll_interval_ms
+
             try:
-                dom_triggered = await page.evaluate("window.__xss_dom_triggered || false")
-                dom_msg       = await page.evaluate("window.__xss_dom_msg || ''")
+                dom_msg = await page.evaluate("window.__xss_dom_msg || ''")
             except Exception:
                 pass
 
@@ -1984,9 +2006,9 @@ async def run_scan(args) -> None:
     console.print()
 
     payloads  = load_payloads()
-    semaphore = AdaptiveConcurrency(concurrency)
     results:  list = []
     background_tasks: list = []
+    semaphore = AdaptiveConcurrency(concurrency, background_tasks=background_tasks)
     targets:  list[ScanTarget] = []
     start = time.time()
 
@@ -2100,7 +2122,8 @@ async def run_scan(args) -> None:
                         await apply_stealth(dom_page)
                         await setup_page_bypass(dom_page, rand_ua(), rand_ip())
                         dom_findings = await check_dom_xss(
-                            dom_page, url, payloads, nav_timeout, jitter_min, jitter_max
+                            dom_page, url, payloads, nav_timeout, jitter_min, jitter_max,
+                            dialog_timeout=dialog_timeout,
                         )
                         for df in dom_findings:
                             if take_screenshot:
